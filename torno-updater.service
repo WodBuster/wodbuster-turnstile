@@ -1,0 +1,10 @@
+[Unit]
+Description=Actualizador OTA del torno QR
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 /home/jesus/torno_qr/actualizador.py
+User=root

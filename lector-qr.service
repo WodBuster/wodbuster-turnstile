@@ -1,0 +1,26 @@
+[Unit]
+Description=Lector QR + Relé (torno_qr)
+After=multi-user.target
+
+[Service]
+Type=notify
+Environment=PYTHONUNBUFFERED=1
+# Ruta al script y al dispositivo del lector - ajusta si cambian
+ExecStart=/usr/bin/python3 /home/jesus/torno_qr/lector_qr_rele.py --entrada /dev/input/by-path/platform-xhci-hcd.1-usb-0:1:1.0-event-kbd --salida /dev/input/by-path/platform-xhci-hcd.0-usb-0:1:1.0-event-kbd
+WorkingDirectory=/home/jesus/torno_qr
+
+# --- Reinicio si el programa se cierra o falla ---
+Restart=always
+RestartSec=3
+
+# --- Reinicio si el programa se queda colgado o un lector lleva
+#     caído más de 60s sin poder reconectar (ver tolerancia_caido_segundos
+#     en lector_qr_rele.py) ---
+WatchdogSec=90
+
+# El lector/relé necesita permisos de root para acceder a /dev/input y GPIO
+User=root
+
+# Reinicia también si systemd/la Pi arrancan
+[Install]
+WantedBy=multi-user.target
