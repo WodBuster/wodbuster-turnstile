@@ -29,6 +29,7 @@ Normalmente se ejecuta solo, mediante un temporizador de systemd
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import tarfile
@@ -37,12 +38,13 @@ import time
 import urllib.request
 
 # ---------- CONFIGURACIÓN - AJUSTA ESTO ----------
-GITHUB_REPO = "ControlTorno/torno-qr"
+GITHUB_REPO = "WodBuster/wodbuster-turnstile"
 INSTALL_DIR = "/home/jesus/torno_qr"
 SERVICE_NAME = "lector-qr.service"
 VERSION_FILE = os.path.join(INSTALL_DIR, "VERSION")
 BACKUP_DIR = "/home/jesus/torno_qr_backups"
 SEGUNDOS_ESPERA_VERIFICACION = 8   # cuánto esperar tras reiniciar para comprobar que arrancó bien
+MAX_BACKUPS = 3                    # cuántos backups se conservan (los más recientes)
 # ---------------------------------------------------
 
 
@@ -83,12 +85,45 @@ def version_mas_nueva(v_remota, v_local):
         return v_remota != v_local
 
 
+def _ignorar_archivos_especiales(directorio, nombres):
+    """Para usar con shutil.copytree: evita que falle por archivos que no son
+    ni ficheros normales, ni carpetas, ni enlaces (pipes, sockets, etc.),
+    que a veces dejan otros programas (editores, IDEs) como archivos temporales."""
+    ignorar = []
+    for nombre in nombres:
+        ruta = os.path.join(directorio, nombre)
+        try:
+            modo = os.lstat(ruta).st_mode
+        except FileNotFoundError:
+            continue
+        if not (stat.S_ISREG(modo) or stat.S_ISDIR(modo) or stat.S_ISLNK(modo)):
+            print(f"[actualizador] Ignorando archivo especial (no se copia): {ruta}")
+            ignorar.append(nombre)
+    return ignorar
+
+
+def limpiar_backups_antiguos():
+    """Borra los backups más antiguos, manteniendo solo los últimos MAX_BACKUPS."""
+    if not os.path.exists(BACKUP_DIR):
+        return
+    backups = sorted([
+        d for d in os.listdir(BACKUP_DIR)
+        if os.path.isdir(os.path.join(BACKUP_DIR, d))
+    ])  # orden alfabético = orden cronológico (nombre backup_YYYYMMDD_HHMMSS)
+
+    a_borrar = backups[:-MAX_BACKUPS] if len(backups) > MAX_BACKUPS else []
+    for nombre in a_borrar:
+        ruta = os.path.join(BACKUP_DIR, nombre)
+        shutil.rmtree(ruta)
+        log(f"Backup antiguo eliminado: {nombre}")
+
+
 def hacer_backup():
     """Copia la instalación actual antes de tocar nada."""
     os.makedirs(BACKUP_DIR, exist_ok=True)
     marca_tiempo = time.strftime("%Y%m%d_%H%M%S")
     destino = os.path.join(BACKUP_DIR, f"backup_{marca_tiempo}")
-    shutil.copytree(INSTALL_DIR, destino)
+    shutil.copytree(INSTALL_DIR, destino, ignore=_ignorar_archivos_especiales)
     log(f"Backup creado en {destino}")
     return destino
 
@@ -103,7 +138,10 @@ def descargar_y_extraer(url_descarga):
     urllib.request.urlretrieve(url_descarga, tar_path)
 
     with tarfile.open(tar_path) as tar:
-        tar.extractall(tmp_dir)
+        tar.extractall(tmp_dir, filter="data")
+
+    # Borramos el tarball ya extraído para no acumular archivos en /tmp
+    os.remove(tar_path)
 
     # GitHub mete todo dentro de una única carpeta tipo "usuario-repo-hash"
     carpetas = [
@@ -113,14 +151,20 @@ def descargar_y_extraer(url_descarga):
     if not carpetas:
         raise RuntimeError("El archivo descargado no contiene ninguna carpeta")
 
-    return os.path.join(tmp_dir, carpetas[0])
+    return os.path.join(tmp_dir, carpetas[0]), tmp_dir
 
 
 def aplicar_actualizacion(carpeta_origen, nueva_version):
-    """Copia los archivos nuevos sobre la instalación actual."""
+    """Copia los archivos nuevos sobre la instalación actual,
+    e instala en systemd los archivos .service y .timer si han cambiado."""
+    ARCHIVOS_IGNORAR = {
+        "vigilante_red_config.json",   # configuración local de cada Pi, nunca sobrescribir
+        "estado_vigilante_red.json",   # estado interno del vigilante, nunca sobrescribir
+    }
+
     for item in os.listdir(carpeta_origen):
-        if item.startswith("."):
-            continue  # nos saltamos .git, .github, etc.
+        if item.startswith(".") or item in ARCHIVOS_IGNORAR:
+            continue
         origen = os.path.join(carpeta_origen, item)
         destino = os.path.join(INSTALL_DIR, item)
         if os.path.isdir(origen):
@@ -129,6 +173,20 @@ def aplicar_actualizacion(carpeta_origen, nueva_version):
             shutil.copytree(origen, destino)
         else:
             shutil.copy2(origen, destino)
+
+    # Instalar / actualizar archivos de systemd si vienen en la actualización
+    archivos_systemd = [
+        f for f in os.listdir(carpeta_origen)
+        if f.endswith(".service") or f.endswith(".timer")
+    ]
+    if archivos_systemd:
+        for archivo in archivos_systemd:
+            origen = os.path.join(carpeta_origen, archivo)
+            destino = f"/etc/systemd/system/{archivo}"
+            shutil.copy2(origen, destino)
+            log(f"Servicio systemd actualizado: {archivo}")
+        subprocess.run(["systemctl", "daemon-reload"], check=True)
+        log("systemd recargado.")
 
     with open(VERSION_FILE, "w") as f:
         f.write(nueva_version)
@@ -153,16 +211,22 @@ def restaurar_backup(ruta_backup):
     # Vaciamos el directorio de instalación y volvemos a poner el backup
     for item in os.listdir(INSTALL_DIR):
         ruta = os.path.join(INSTALL_DIR, item)
-        if os.path.isdir(ruta):
+        try:
+            modo = os.lstat(ruta).st_mode
+        except FileNotFoundError:
+            continue
+        if stat.S_ISDIR(modo):
             shutil.rmtree(ruta)
-        else:
+        elif stat.S_ISREG(modo) or stat.S_ISLNK(modo):
             os.remove(ruta)
+        else:
+            print(f"[actualizador] Ignorando archivo especial al limpiar: {ruta}")
 
     for item in os.listdir(ruta_backup):
         origen = os.path.join(ruta_backup, item)
         destino = os.path.join(INSTALL_DIR, item)
         if os.path.isdir(origen):
-            shutil.copytree(origen, destino)
+            shutil.copytree(origen, destino, ignore=_ignorar_archivos_especiales)
         else:
             shutil.copy2(origen, destino)
 
@@ -188,9 +252,10 @@ def main():
     log(f"Nueva versión detectada: {v_remota}. Aplicando actualización...")
 
     ruta_backup = hacer_backup()
+    tmp_dir = None
 
     try:
-        carpeta_extraida = descargar_y_extraer(url_descarga)
+        carpeta_extraida, tmp_dir = descargar_y_extraer(url_descarga)
         aplicar_actualizacion(carpeta_extraida, v_remota)
         reiniciar_servicio()
 
@@ -199,12 +264,19 @@ def main():
 
         if servicio_esta_activo():
             log(f"Actualización a {v_remota} completada con éxito.")
+            limpiar_backups_antiguos()
         else:
             restaurar_backup(ruta_backup)
 
     except Exception as e:
         log(f"Error durante la actualización: {e}")
         restaurar_backup(ruta_backup)
+
+    finally:
+        # Limpiamos siempre los archivos temporales de la descarga
+        if tmp_dir and os.path.exists(tmp_dir):
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            log("Archivos temporales de descarga eliminados.")
 
 
 if __name__ == "__main__":
