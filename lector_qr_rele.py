@@ -28,10 +28,40 @@ También se puede usar con un solo lector:
 
 import sys
 import os
+import json
 import socket
 import time
 import threading
+import urllib.request
+import urllib.error
+import base64
 from datetime import datetime
+
+# FIFO (pipe con nombre) para ver accesos en tiempo real por SSH.
+# No guarda nada en disco — las líneas se muestran y desaparecen.
+# Para leer: cat /tmp/torno_live  (en otra sesión SSH)
+FIFO_PATH = "/tmp/torno_live"
+_fifo_lock = threading.Lock()
+
+
+def iniciar_fifo():
+    """Crea el FIFO si no existe."""
+    if not os.path.exists(FIFO_PATH):
+        os.mkfifo(FIFO_PATH)
+
+
+def log_live(mensaje):
+    """Escribe en el FIFO de forma no bloqueante.
+    Si nadie está leyendo, descarta el mensaje (no bloquea el programa)."""
+    try:
+        linea = f"{datetime.now().strftime('%H:%M:%S')} {mensaje}\n"
+        # O_NONBLOCK: si no hay nadie leyendo, falla silenciosamente
+        fd = os.open(FIFO_PATH, os.O_WRONLY | os.O_NONBLOCK)
+        with _fifo_lock:
+            os.write(fd, linea.encode())
+            os.close(fd)
+    except OSError:
+        pass  # nadie está leyendo, descartamos el mensaje
 
 from gpiozero import OutputDevice
 from evdev import InputDevice, categorize, ecodes
@@ -94,7 +124,65 @@ def iniciar_latido_watchdog(hilos, estados, intervalo_segundos=10, tolerancia_ca
     threading.Thread(target=latido, daemon=True).start()
 
 
-# ---------- Configuración de relés ----------
+# ---------- Configuración de la API ----------
+API_CONFIG_FILE = "/home/jesus/torno_qr/acceso_config.json"
+
+API_CONFIG_POR_DEFECTO = {
+    "url": "https://TUBOX.wodbuster.com/api/acceso",
+    "usuario": "USUARIO_API",
+    "password": "PASSWORD_API",
+    "timeout_segundos": 5
+}
+
+
+def cargar_config_api():
+    """Lee la configuración de la API desde acceso_config.json.
+    Si no existe, lo crea con valores de ejemplo y avisa."""
+    if not os.path.exists(API_CONFIG_FILE):
+        with open(API_CONFIG_FILE, "w") as f:
+            json.dump(API_CONFIG_POR_DEFECTO, f, indent=4)
+        print(f"[API] AVISO: Se creó {API_CONFIG_FILE} con valores de ejemplo.")
+        print("[API] Por favor, edita ese archivo con los datos reales de tu instalación.")
+        return dict(API_CONFIG_POR_DEFECTO)
+    with open(API_CONFIG_FILE) as f:
+        return json.load(f)
+
+
+def validar_qr_con_api(codigo_qr, config_api):
+    """Llama a la API de WodBuster para validar el código QR.
+
+    Devuelve True si tiene acceso, False en cualquier otro caso
+    (acceso denegado, error de red, timeout...) — política fail closed.
+    """
+    try:
+        datos = json.dumps({"Codigo": codigo_qr}).encode("utf-8")
+        credenciales = base64.b64encode(
+            f"{config_api['usuario']}:{config_api['password']}".encode()
+        ).decode()
+
+        req = urllib.request.Request(
+            config_api["url"],
+            data=datos,
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Basic {credenciales}",
+            },
+            method="POST",
+        )
+
+        with urllib.request.urlopen(req, timeout=config_api.get("timeout_segundos", 5)) as resp:
+            respuesta = json.loads(resp.read().decode("utf-8"))
+
+        if not respuesta.get("IsOk"):
+            return False
+
+        return respuesta.get("Data", {}).get("TieneAcceso", False)
+
+    except Exception:
+        return False  # fail closed: cualquier error = no abrir
+
+
+
 SEGUNDOS_ACTIVADO = 2  # tiempo que permanece activado cada relé tras un escaneo
 
 PIN_RELE_ENTRADA = 20  # CH2
@@ -188,10 +276,14 @@ def escuchar_lector(ruta_dispositivo, nombre_canal, rele, estado):
                     if tecla.keystate == tecla.key_down:
                         if codigo_tecla == 'KEY_ENTER':
                             if buffer:
-                                contador += 1
                                 hora = datetime.now().strftime("%H:%M:%S")
-                                print(f"[{nombre_canal}] [{hora}] QR #{contador} -> {buffer}")
-                                activar_rele(rele, nombre_canal)
+                                config_api = cargar_config_api()
+                                tiene_acceso = validar_qr_con_api(buffer, config_api)
+                                if tiene_acceso:
+                                    log_live(f"[{nombre_canal}] ACCESO PERMITIDO")
+                                    activar_rele(rele, nombre_canal)
+                                else:
+                                    log_live(f"[{nombre_canal}] ACCESO DENEGADO")
                                 buffer = ""
                         elif codigo_tecla in MAPA_TECLAS:
                             normal, con_shift = MAPA_TECLAS[codigo_tecla]
@@ -207,6 +299,7 @@ def escuchar_lector(ruta_dispositivo, nombre_canal, rele, estado):
 
 
 def main():
+    iniciar_fifo()
     ruta_entrada = None
     ruta_salida = None
 
