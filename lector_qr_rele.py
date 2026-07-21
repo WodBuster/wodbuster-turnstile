@@ -32,6 +32,7 @@ import json
 import socket
 import time
 import threading
+import signal
 import urllib.request
 import urllib.error
 import base64
@@ -85,15 +86,14 @@ def _notificar_systemd(mensaje: str):
         print(f"[watchdog] No se pudo notificar a systemd: {e}")
 
 
-def iniciar_latido_watchdog(hilos, estados, intervalo_segundos=10, tolerancia_caido_segundos=60):
-    """Manda WATCHDOG=1 a systemd solo si el sistema está realmente sano:
-    - Todos los hilos lectores siguen vivos (no han crasheado).
-    - Ningún lector lleva "caído" (desconectado / sin abrir) más de
-      `tolerancia_caido_segundos`. Una desconexión breve es normal
-      (alguien tira del cable un segundo); una desconexión larga significa
-      que algo va mal de verdad y conviene que systemd reinicie todo.
+def iniciar_latido_watchdog(hilos, estado_torno, intervalo_segundos=10, limite_operacion_segundos=20):
+    """Manda WATCHDOG=1 solo mientras el programa puede atender accesos.
+
+    Un lector USB sin eventos puede estar perfectamente sano, por lo que una
+    desconexión no fuerza un reinicio de la Pi. En cambio, si un hilo muere o
+    una validación queda bloqueada más allá de su límite, dejamos que systemd
+    reinicie el proceso de forma controlada.
     """
-    tiempo_caido_desde = {nombre: None for nombre in estados}
 
     def latido():
         while True:
@@ -104,17 +104,14 @@ def iniciar_latido_watchdog(hilos, estados, intervalo_segundos=10, tolerancia_ca
                     print(f"[watchdog] Hilo '{h.name}' ha muerto. No se envía latido.")
                     sano = False
 
-            ahora = time.time()
-            for nombre, estado in estados.items():
-                if estado["ok"]:
-                    tiempo_caido_desde[nombre] = None
-                else:
-                    if tiempo_caido_desde[nombre] is None:
-                        tiempo_caido_desde[nombre] = ahora
-                    caido_desde_hace = ahora - tiempo_caido_desde[nombre]
-                    if caido_desde_hace > tolerancia_caido_segundos:
-                        print(f"[watchdog] Lector '{nombre}' lleva caído {int(caido_desde_hace)}s. No se envía latido.")
-                        sano = False
+            with estado_torno["lock"]:
+                inicio = estado_torno["operacion_iniciada"]
+                sentido = estado_torno["sentido"]
+            if inicio is not None:
+                duracion = time.monotonic() - inicio
+                if duracion > limite_operacion_segundos:
+                    print(f"[watchdog] Operación de '{sentido}' bloqueada durante {int(duracion)}s. No se envía latido.")
+                    sano = False
 
             if sano:
                 _notificar_systemd("WATCHDOG=1")
@@ -184,6 +181,15 @@ def validar_qr_con_api(codigo_qr, config_api):
 
 
 SEGUNDOS_ACTIVADO = 2  # tiempo que permanece activado cada relé tras un escaneo
+# Un lector QR tipo teclado envía todos los caracteres de una lectura en pocos
+# milisegundos. Si hay una pausa mayor, descartamos el fragmento anterior para
+# no mezclar una lectura incompleta con la siguiente.
+MAX_PAUSA_ENTRE_CARACTERES_QR = 1.0
+# Sin sensor de paso, mantenemos el torno ocupado un margen tras apagar el
+# relé. Es una política de seguridad de flujo: evita órdenes opuestas o una
+# segunda autorización inmediata, pero el mecanismo del torno debe ser quien
+# garantice físicamente una única rotación por cada apertura.
+SEGUNDOS_BLOQUEO_POSTERIOR = 2
 
 PIN_RELE_ENTRADA = 20  # CH2
 PIN_RELE_SALIDA = 21   # CH3
@@ -193,15 +199,14 @@ rele_salida = OutputDevice(PIN_RELE_SALIDA, active_high=True, initial_value=Fals
 
 
 def activar_rele(rele, nombre_canal):
-    """Activa un relé unos segundos en un hilo aparte, para no bloquear la lectura."""
-    def tarea():
-        rele.on()
-        print(f"   -> Relé {nombre_canal} ACTIVADO ({SEGUNDOS_ACTIVADO}s)")
+    """Activa un relé durante el tiempo configurado y siempre lo deja apagado."""
+    rele.on()
+    print(f"   -> Relé {nombre_canal} ACTIVADO ({SEGUNDOS_ACTIVADO}s)")
+    try:
         time.sleep(SEGUNDOS_ACTIVADO)
+    finally:
         rele.off()
         print(f"   -> Relé {nombre_canal} desactivado")
-
-    threading.Thread(target=tarea, daemon=True).start()
 
 
 # ---------- Mapeo de teclas (con soporte de Shift) ----------
@@ -232,7 +237,7 @@ MAPA_TECLAS = {
 TECLAS_SHIFT = ('KEY_LEFTSHIFT', 'KEY_RIGHTSHIFT')
 
 
-def escuchar_lector(ruta_dispositivo, nombre_canal, rele, estado):
+def escuchar_lector(ruta_dispositivo, nombre_canal, rele, estado_lector, estado_torno):
     """Escucha un lector QR en su propio hilo y activa el relé indicado
     cada vez que detecta un código completo.
 
@@ -243,26 +248,53 @@ def escuchar_lector(ruta_dispositivo, nombre_canal, rele, estado):
     """
     ESPERA_RECONEXION = 5  # segundos entre intentos si el lector no está disponible
 
+    def procesar_lectura(codigo_qr):
+        """Valida una lectura y libera el carril cuando termina.
+
+        No hay cola: mientras se valida un QR o el rele esta abierto, el bucle
+        del lector sigue consumiendo eventos y descarta nuevas lecturas.
+        """
+        try:
+            config_api = cargar_config_api()
+            tiene_acceso = validar_qr_con_api(codigo_qr, config_api)
+            if tiene_acceso:
+                log_live(f"[{nombre_canal}] ACCESO PERMITIDO")
+                activar_rele(rele, nombre_canal)
+            else:
+                log_live(f"[{nombre_canal}] ACCESO DENEGADO")
+            if tiene_acceso:
+                time.sleep(SEGUNDOS_BLOQUEO_POSTERIOR)
+        except Exception:
+            # Ante un error interno, el acceso se mantiene cerrado.
+            log_live(f"[{nombre_canal}] ERROR INTERNO")
+        finally:
+            with estado_torno["lock"]:
+                estado_torno["ocupado"] = False
+                estado_torno["operacion_iniciada"] = None
+                estado_torno["sentido"] = None
+
     while True:
         try:
             dev = InputDevice(ruta_dispositivo)
         except Exception as e:
-            if estado["ok"]:
+            if estado_lector["ok"]:
                 print(f"[{nombre_canal}] ERROR: no se pudo abrir {ruta_dispositivo}: {e}")
-            estado["ok"] = False
+            estado_lector["ok"] = False
             time.sleep(ESPERA_RECONEXION)
             continue
 
         print(f"[{nombre_canal}] Escuchando en: {dev.name} ({ruta_dispositivo})")
-        estado["ok"] = True
+        estado_lector["ok"] = True
 
         buffer = ""
         contador = 0
         shift_activo = False
+        ultimo_caracter = None
+        descartando_hasta_enter = False
 
         try:
             for evento in dev.read_loop():
-                estado["ok"] = True  # seguimos recibiendo eventos con normalidad
+                estado_lector["ok"] = True  # seguimos recibiendo eventos con normalidad
                 if evento.type == ecodes.EV_KEY:
                     tecla = categorize(evento)
                     codigo_tecla = tecla.keycode
@@ -274,26 +306,67 @@ def escuchar_lector(ruta_dispositivo, nombre_canal, rele, estado):
                         continue
 
                     if tecla.keystate == tecla.key_down:
+                        if descartando_hasta_enter:
+                            if codigo_tecla == 'KEY_ENTER':
+                                descartando_hasta_enter = False
+                            continue
+
+                        with estado_torno["lock"]:
+                            torno_ocupado = estado_torno["ocupado"]
+                        if torno_ocupado:
+                            # Si una lectura empieza con el torno ocupado,
+                            # descartamos todos sus caracteres hasta Enter.
+                            # Así no puede mezclarse con la siguiente.
+                            buffer = ""
+                            ultimo_caracter = None
+                            descartando_hasta_enter = codigo_tecla != 'KEY_ENTER'
+                            continue
+
                         if codigo_tecla == 'KEY_ENTER':
-                            if buffer:
-                                hora = datetime.now().strftime("%H:%M:%S")
-                                config_api = cargar_config_api()
-                                tiene_acceso = validar_qr_con_api(buffer, config_api)
-                                if tiene_acceso:
-                                    log_live(f"[{nombre_canal}] ACCESO PERMITIDO")
-                                    activar_rele(rele, nombre_canal)
-                                else:
-                                    log_live(f"[{nombre_canal}] ACCESO DENEGADO")
+                            ahora = time.monotonic()
+                            if (
+                                buffer
+                                and ultimo_caracter is not None
+                                and ahora - ultimo_caracter > MAX_PAUSA_ENTRE_CARACTERES_QR
+                            ):
+                                # Enter tardío de una lectura incompleta: no
+                                # se envía ni se mezcla con una lectura futura.
                                 buffer = ""
+                                ultimo_caracter = None
+                            if buffer:
+                                codigo_qr = buffer
+                                buffer = ""
+                                ultimo_caracter = None
+                                with estado_torno["lock"]:
+                                    if estado_torno["ocupado"]:
+                                        # Entrada y salida comparten el mismo
+                                        # torno: no se encolan ni reintentan.
+                                        continue
+                                    estado_torno["ocupado"] = True
+                                    estado_torno["operacion_iniciada"] = time.monotonic()
+                                    estado_torno["sentido"] = nombre_canal
+                                threading.Thread(
+                                    target=procesar_lectura,
+                                    args=(codigo_qr,),
+                                    name=f"acceso-{nombre_canal}",
+                                    daemon=True,
+                                ).start()
                         elif codigo_tecla in MAPA_TECLAS:
+                            ahora = time.monotonic()
+                            if (
+                                ultimo_caracter is not None
+                                and ahora - ultimo_caracter > MAX_PAUSA_ENTRE_CARACTERES_QR
+                            ):
+                                buffer = ""
                             normal, con_shift = MAPA_TECLAS[codigo_tecla]
                             buffer += con_shift if shift_activo else normal
+                            ultimo_caracter = ahora
                         else:
                             print(f"[{nombre_canal}] [aviso] Tecla no mapeada: {codigo_tecla}")
         except Exception as e:
             # El dispositivo se desconectó o dejó de responder a mitad de lectura
             print(f"[{nombre_canal}] Lector desconectado ({e}). Reintentando en {ESPERA_RECONEXION}s...")
-            estado["ok"] = False
+            estado_lector["ok"] = False
             time.sleep(ESPERA_RECONEXION)
             # el bucle while True vuelve a intentar abrir el dispositivo
 
@@ -320,12 +393,28 @@ def main():
 
     hilos = []
     estados = {}
+    estado_torno = {
+        "ocupado": False,
+        "operacion_iniciada": None,
+        "sentido": None,
+        "lock": threading.Lock(),
+    }
+    detener = threading.Event()
+
+    def solicitar_parada(signum, frame):
+        print("[sistema] Parada solicitada.")
+        detener.set()
+
+    signal.signal(signal.SIGTERM, solicitar_parada)
+    signal.signal(signal.SIGINT, solicitar_parada)
 
     if ruta_entrada:
-        estados["ENTRADA"] = {"ok": False}
+        estados["ENTRADA"] = {
+            "ok": False,
+        }
         h = threading.Thread(
             target=escuchar_lector,
-            args=(ruta_entrada, "ENTRADA", rele_entrada, estados["ENTRADA"]),
+            args=(ruta_entrada, "ENTRADA", rele_entrada, estados["ENTRADA"], estado_torno),
             name="lector-ENTRADA",
             daemon=True,
         )
@@ -333,10 +422,12 @@ def main():
         hilos.append(h)
 
     if ruta_salida:
-        estados["SALIDA"] = {"ok": False}
+        estados["SALIDA"] = {
+            "ok": False,
+        }
         h = threading.Thread(
             target=escuchar_lector,
-            args=(ruta_salida, "SALIDA", rele_salida, estados["SALIDA"]),
+            args=(ruta_salida, "SALIDA", rele_salida, estados["SALIDA"], estado_torno),
             name="lector-SALIDA",
             daemon=True,
         )
@@ -344,13 +435,11 @@ def main():
         hilos.append(h)
 
     _notificar_systemd("READY=1")
-    iniciar_latido_watchdog(hilos, estados)
+    iniciar_latido_watchdog(hilos, estado_torno)
 
     try:
-        while True:
-            time.sleep(1)
-    except KeyboardInterrupt:
-        print("\nPrograma finalizado por el usuario (Ctrl+C)")
+        while not detener.wait(1):
+            pass
     finally:
         rele_entrada.off()
         rele_salida.off()

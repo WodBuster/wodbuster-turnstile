@@ -45,6 +45,13 @@ VERSION_FILE = os.path.join(INSTALL_DIR, "VERSION")
 BACKUP_DIR = "/home/jesus/torno_qr_backups"
 SEGUNDOS_ESPERA_VERIFICACION = 8   # cuánto esperar tras reiniciar para comprobar que arrancó bien
 MAX_BACKUPS = 3                    # cuántos backups se conservan (los más recientes)
+UNIDADES_SYSTEMD = (
+    "lector-qr.service",
+    "torno-network-watchdog.service",
+    "torno-updater.service",
+    "torno-updater.timer",
+)
+DIRECTORIO_BACKUP_SYSTEMD = "_systemd_units"
 # ---------------------------------------------------
 
 
@@ -124,8 +131,41 @@ def hacer_backup():
     marca_tiempo = time.strftime("%Y%m%d_%H%M%S")
     destino = os.path.join(BACKUP_DIR, f"backup_{marca_tiempo}")
     shutil.copytree(INSTALL_DIR, destino, ignore=_ignorar_archivos_especiales)
+    hacer_backup_unidades_systemd(destino)
     log(f"Backup creado en {destino}")
     return destino
+
+
+def hacer_backup_unidades_systemd(destino_backup):
+    """Guarda las unidades que el actualizador tiene permitido modificar."""
+    directorio = os.path.join(destino_backup, DIRECTORIO_BACKUP_SYSTEMD)
+    os.makedirs(directorio, exist_ok=True)
+    presentes = []
+    for nombre in UNIDADES_SYSTEMD:
+        origen = os.path.join("/etc/systemd/system", nombre)
+        if os.path.isfile(origen):
+            shutil.copy2(origen, os.path.join(directorio, nombre))
+            presentes.append(nombre)
+    with open(os.path.join(directorio, "estado.json"), "w") as f:
+        json.dump({"presentes": presentes}, f)
+
+
+def restaurar_unidades_systemd(ruta_backup):
+    """Restaura exactamente las unidades existentes antes de actualizar."""
+    directorio = os.path.join(ruta_backup, DIRECTORIO_BACKUP_SYSTEMD)
+    with open(os.path.join(directorio, "estado.json")) as f:
+        presentes = set(json.load(f)["presentes"])
+
+    for nombre in UNIDADES_SYSTEMD:
+        destino = os.path.join("/etc/systemd/system", nombre)
+        origen = os.path.join(directorio, nombre)
+        if nombre in presentes:
+            shutil.copy2(origen, destino)
+        elif os.path.exists(destino):
+            os.remove(destino)
+
+    subprocess.run(["systemctl", "daemon-reload"], check=True)
+    log("Unidades systemd restauradas.")
 
 
 def descargar_y_extraer(url_descarga):
@@ -176,8 +216,8 @@ def aplicar_actualizacion(carpeta_origen, nueva_version):
 
     # Instalar / actualizar archivos de systemd si vienen en la actualización
     archivos_systemd = [
-        f for f in os.listdir(carpeta_origen)
-        if f.endswith(".service") or f.endswith(".timer")
+        archivo for archivo in UNIDADES_SYSTEMD
+        if os.path.isfile(os.path.join(carpeta_origen, archivo))
     ]
     if archivos_systemd:
         for archivo in archivos_systemd:
@@ -208,6 +248,9 @@ def servicio_esta_activo():
 
 def restaurar_backup(ruta_backup):
     log("¡La nueva versión falló! Restaurando la copia de seguridad...")
+    # Paramos la nueva versión antes de modificar código o unidades. El lector
+    # recibe SIGTERM y deja los relés en estado seguro antes del siguiente arranque.
+    subprocess.run(["systemctl", "stop", SERVICE_NAME], check=False)
     # Vaciamos el directorio de instalación y volvemos a poner el backup
     for item in os.listdir(INSTALL_DIR):
         ruta = os.path.join(INSTALL_DIR, item)
@@ -223,6 +266,8 @@ def restaurar_backup(ruta_backup):
             print(f"[actualizador] Ignorando archivo especial al limpiar: {ruta}")
 
     for item in os.listdir(ruta_backup):
+        if item == DIRECTORIO_BACKUP_SYSTEMD:
+            continue
         origen = os.path.join(ruta_backup, item)
         destino = os.path.join(INSTALL_DIR, item)
         if os.path.isdir(origen):
@@ -230,6 +275,7 @@ def restaurar_backup(ruta_backup):
         else:
             shutil.copy2(origen, destino)
 
+    restaurar_unidades_systemd(ruta_backup)
     reiniciar_servicio()
     log("Rollback completado. Versión anterior restaurada y en marcha.")
 

@@ -15,10 +15,9 @@ WorkingDirectory=/home/jesus/torno_qr
 Restart=always
 RestartSec=3
 
-# --- Reinicio si el programa se queda colgado o un lector lleva
-#     caído más de 60s sin poder reconectar (ver tolerancia_caido_segundos
-#     en lector_qr_rele.py) ---
-WatchdogSec=90
+# --- Reinicio si el proceso se bloquea. Un lector USB desconectado no
+#     provoca reinicios de la Raspberry: el programa reintenta reconectar. ---
+WatchdogSec=45
 
 # El lector/relé necesita permisos de root para acceder a /dev/input y GPIO
 User=root
