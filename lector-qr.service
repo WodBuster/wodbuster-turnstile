@@ -6,7 +6,7 @@ After=multi-user.target
 Type=notify
 Environment=PYTHONUNBUFFERED=1
 StandardOutput=null
-StandardError=journal
+StandardError=null
 # Ruta al script y al dispositivo del lector - ajusta si cambian
 ExecStart=/usr/bin/python3 /home/jesus/torno_qr/lector_qr_rele.py --entrada /dev/input/by-path/platform-xhci-hcd.1-usb-0:1:1.0-event-kbd --salida /dev/input/by-path/platform-xhci-hcd.0-usb-0:1:1.0-event-kbd
 WorkingDirectory=/home/jesus/torno_qr
