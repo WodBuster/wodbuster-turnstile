@@ -198,6 +198,7 @@ def aplicar_actualizacion(carpeta_origen, nueva_version):
     """Copia los archivos nuevos sobre la instalación actual,
     e instala en systemd los archivos .service y .timer si han cambiado."""
     ARCHIVOS_IGNORAR = {
+        "acceso_config.json",          # credenciales locales, nunca sobrescribir
         "vigilante_red_config.json",   # configuración local de cada Pi, nunca sobrescribir
         "estado_vigilante_red.json",   # estado interno del vigilante, nunca sobrescribir
     }

@@ -35,7 +35,10 @@ import threading
 import signal
 import urllib.request
 import urllib.error
+import urllib.parse
 import base64
+import re
+import tempfile
 from datetime import datetime
 
 # FIFO (pipe con nombre) para ver accesos en tiempo real por SSH.
@@ -123,26 +126,154 @@ def iniciar_latido_watchdog(hilos, estado_torno, intervalo_segundos=10, limite_o
 
 # ---------- Configuración de la API ----------
 API_CONFIG_FILE = "/home/jesus/torno_qr/acceso_config.json"
-
-API_CONFIG_POR_DEFECTO = {
-    "url": "https://TUBOX.wodbuster.com/api/acceso",
-    "usuario": "USUARIO_API",
-    "password": "PASSWORD_API",
-    "timeout_segundos": 5
-}
+CONFIG_QR_SCHEME = "wbconfig"
+CONFIG_QR_HOST = "configure"
+CODIGO_PRUEBA_CONFIG = "config"
+RESULTADO_CONFIG_VALIDA = "valida"
+RESULTADO_CONFIG_401 = "401"
+RESULTADO_CONFIG_INDETERMINADO = "indeterminado"
+PATRON_BOX = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9-]{0,62}$")
 
 
 def cargar_config_api():
-    """Lee la configuración de la API desde acceso_config.json.
-    Si no existe, lo crea con valores de ejemplo y avisa."""
+    """Lee una configuración existente; nunca crea credenciales de ejemplo."""
     if not os.path.exists(API_CONFIG_FILE):
-        with open(API_CONFIG_FILE, "w") as f:
-            json.dump(API_CONFIG_POR_DEFECTO, f, indent=4)
-        print(f"[API] AVISO: Se creó {API_CONFIG_FILE} con valores de ejemplo.")
-        print("[API] Por favor, edita ese archivo con los datos reales de tu instalación.")
-        return dict(API_CONFIG_POR_DEFECTO)
+        return None
+    if (os.stat(API_CONFIG_FILE).st_mode & 0o777) != 0o600:
+        os.chmod(API_CONFIG_FILE, 0o600)
     with open(API_CONFIG_FILE) as f:
-        return json.load(f)
+        config = json.load(f)
+    for clave in ("url", "usuario", "password"):
+        if not isinstance(config.get(clave), str) or not config[clave]:
+            raise ValueError(f"Configuración API inválida: falta {clave}")
+    return config
+
+
+def guardar_config_api(config):
+    """Guarda credenciales validadas de forma atómica y con permisos 0600."""
+    directorio = os.path.dirname(API_CONFIG_FILE)
+    fd, ruta_temporal = tempfile.mkstemp(prefix=".acceso_config_", dir=directorio)
+    try:
+        os.chmod(ruta_temporal, 0o600)
+        with os.fdopen(fd, "w") as f:
+            json.dump(config, f, indent=4)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(ruta_temporal, API_CONFIG_FILE)
+        os.chmod(API_CONFIG_FILE, 0o600)
+    except Exception:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        try:
+            os.remove(ruta_temporal)
+        except OSError:
+            pass
+        raise
+
+
+def _crear_peticion_api(codigo, config_api):
+    datos = json.dumps({"Codigo": codigo}).encode("utf-8")
+    credenciales = base64.b64encode(
+        f"{config_api['usuario']}:{config_api['password']}".encode()
+    ).decode()
+    return urllib.request.Request(
+        config_api["url"],
+        data=datos,
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Basic {credenciales}",
+        },
+        method="POST",
+    )
+
+
+def comprobar_config_api(config_api):
+    """Hace una lectura normal 'config' y distingue únicamente el HTTP 401."""
+    try:
+        req = _crear_peticion_api(CODIGO_PRUEBA_CONFIG, config_api)
+        with urllib.request.urlopen(
+            req, timeout=config_api.get("timeout_segundos", 5)
+        ) as resp:
+            resp.read()
+            return (
+                RESULTADO_CONFIG_VALIDA
+                if 200 <= resp.status < 300
+                else RESULTADO_CONFIG_INDETERMINADO
+            )
+    except urllib.error.HTTPError as e:
+        return RESULTADO_CONFIG_401 if e.code == 401 else RESULTADO_CONFIG_INDETERMINADO
+    except Exception:
+        return RESULTADO_CONFIG_INDETERMINADO
+
+
+def _parametro_unico(parametros, nombre, obligatorio=True):
+    valores = parametros.get(nombre, [])
+    if len(valores) > 1 or (obligatorio and len(valores) != 1):
+        raise ValueError(f"Parámetro de configuración inválido: {nombre}")
+    return valores[0] if valores else None
+
+
+def config_desde_qr(codigo_qr):
+    """Convierte un wbconfig:// en configuración sin permitir una URL arbitraria."""
+    uri = urllib.parse.urlsplit(codigo_qr)
+    if uri.scheme.lower() != CONFIG_QR_SCHEME or uri.netloc.lower() != CONFIG_QR_HOST:
+        raise ValueError("QR de configuración no reconocido")
+    parametros = urllib.parse.parse_qs(uri.query, keep_blank_values=True)
+    permitidos = {"v", "box", "usuario", "pwd", "password"}
+    if set(parametros) - permitidos:
+        raise ValueError("El QR contiene parámetros no permitidos")
+    if _parametro_unico(parametros, "v") != "1":
+        raise ValueError("Versión de configuración no soportada")
+
+    box = _parametro_unico(parametros, "box").strip()
+    usuario = (_parametro_unico(parametros, "usuario", obligatorio=False) or box).strip()
+    password = _parametro_unico(parametros, "pwd", obligatorio=False)
+    password_largo = _parametro_unico(parametros, "password", obligatorio=False)
+    if password is not None and password_largo is not None:
+        raise ValueError("La contraseña está duplicada")
+    password = password if password is not None else password_largo
+
+    if not PATRON_BOX.fullmatch(box):
+        raise ValueError("Código de box inválido")
+    if not usuario or ":" in usuario or len(usuario) > 128:
+        raise ValueError("Usuario API inválido")
+    if not password or len(password) > 512:
+        raise ValueError("Contraseña API inválida")
+
+    return {
+        "url": f"https://{box.lower()}.wodbuster.com/api/acceso",
+        "usuario": usuario,
+        "password": password,
+        "timeout_segundos": 5,
+    }
+
+
+def procesar_qr_configuracion(codigo_qr):
+    """Valida y, solo si procede, sustituye atómicamente la configuración."""
+    try:
+        candidata = config_desde_qr(codigo_qr)
+    except ValueError:
+        return False
+
+    if os.path.exists(API_CONFIG_FILE):
+        try:
+            actual = cargar_config_api()
+        except Exception:
+            # Un fichero presente pero corrupto no equivale a una instalación nueva.
+            return False
+        if comprobar_config_api(actual) != RESULTADO_CONFIG_401:
+            return False
+        if comprobar_config_api(actual) != RESULTADO_CONFIG_401:
+            return False
+
+    # Esta lectura normal deja en el servidor la traza Codigo="config"
+    # asociada al usuario que se va a configurar. TieneAcceso puede ser False.
+    if comprobar_config_api(candidata) != RESULTADO_CONFIG_VALIDA:
+        return False
+    guardar_config_api(candidata)
+    return True
 
 
 def validar_qr_con_api(codigo_qr, config_api):
@@ -152,20 +283,7 @@ def validar_qr_con_api(codigo_qr, config_api):
     (acceso denegado, error de red, timeout...) — política fail closed.
     """
     try:
-        datos = json.dumps({"Codigo": codigo_qr}).encode("utf-8")
-        credenciales = base64.b64encode(
-            f"{config_api['usuario']}:{config_api['password']}".encode()
-        ).decode()
-
-        req = urllib.request.Request(
-            config_api["url"],
-            data=datos,
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Basic {credenciales}",
-            },
-            method="POST",
-        )
+        req = _crear_peticion_api(codigo_qr, config_api)
 
         with urllib.request.urlopen(req, timeout=config_api.get("timeout_segundos", 5)) as resp:
             respuesta = json.loads(resp.read().decode("utf-8"))
@@ -255,7 +373,14 @@ def escuchar_lector(ruta_dispositivo, nombre_canal, rele, estado_lector, estado_
         del lector sigue consumiendo eventos y descarta nuevas lecturas.
         """
         try:
+            if codigo_qr.lower().startswith(f"{CONFIG_QR_SCHEME}:"):
+                procesar_qr_configuracion(codigo_qr)
+                return
+
             config_api = cargar_config_api()
+            if config_api is None:
+                log_live(f"[{nombre_canal}] ACCESO DENEGADO")
+                return
             tiene_acceso = validar_qr_con_api(codigo_qr, config_api)
             if tiene_acceso:
                 log_live(f"[{nombre_canal}] ACCESO PERMITIDO")
