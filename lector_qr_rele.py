@@ -130,7 +130,7 @@ CONFIG_QR_SCHEME = "wbconfig"
 CONFIG_QR_HOST = "configure"
 CODIGO_PRUEBA_CONFIG = "config"
 RESULTADO_CONFIG_VALIDA = "valida"
-RESULTADO_CONFIG_401 = "401"
+RESULTADO_CONFIG_RECHAZADA = "credenciales_rechazadas"
 RESULTADO_CONFIG_INDETERMINADO = "indeterminado"
 PATRON_BOX = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9-]{0,62}$")
 MODO_DIAGNOSTICO = False
@@ -224,7 +224,12 @@ def _crear_peticion_api(codigo, config_api):
 
 
 def comprobar_config_api(config_api):
-    """Hace una lectura normal 'config' y distingue únicamente el HTTP 401."""
+    """Comprueba credenciales y distingue los rechazos HTTP 401/403.
+
+    La API de acceso puede utilizar 403 para unas credenciales no válidas.
+    Cualquier otro fallo se considera indeterminado y nunca habilita una
+    reconfiguración.
+    """
     try:
         req = _crear_peticion_api(CODIGO_PRUEBA_CONFIG, config_api)
         _diagnosticar_peticion(CODIGO_PRUEBA_CONFIG, config_api)
@@ -246,7 +251,11 @@ def comprobar_config_api(config_api):
         diagnostico(
             f"Recibido HTTP {e.code}: {_respuesta_para_diagnostico(cuerpo)}"
         )
-        return RESULTADO_CONFIG_401 if e.code == 401 else RESULTADO_CONFIG_INDETERMINADO
+        return (
+            RESULTADO_CONFIG_RECHAZADA
+            if e.code in (401, 403)
+            else RESULTADO_CONFIG_INDETERMINADO
+        )
     except Exception as e:
         diagnostico(f"Error llamando a la API: {type(e).__name__}: {e}")
         return RESULTADO_CONFIG_INDETERMINADO
@@ -319,11 +328,11 @@ def procesar_qr_configuracion(codigo_qr):
             return False
         primer_resultado = comprobar_config_api(actual)
         diagnostico(f"Primera comprobación de la configuración actual: {primer_resultado}")
-        if primer_resultado != RESULTADO_CONFIG_401:
+        if primer_resultado != RESULTADO_CONFIG_RECHAZADA:
             return False
         segundo_resultado = comprobar_config_api(actual)
         diagnostico(f"Segunda comprobación de la configuración actual: {segundo_resultado}")
-        if segundo_resultado != RESULTADO_CONFIG_401:
+        if segundo_resultado != RESULTADO_CONFIG_RECHAZADA:
             return False
 
     # Esta lectura normal deja en el servidor la traza Codigo="config"
