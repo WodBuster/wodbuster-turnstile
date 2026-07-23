@@ -133,6 +133,40 @@ RESULTADO_CONFIG_VALIDA = "valida"
 RESULTADO_CONFIG_401 = "401"
 RESULTADO_CONFIG_INDETERMINADO = "indeterminado"
 PATRON_BOX = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9-]{0,62}$")
+MODO_DIAGNOSTICO = False
+MAX_RESPUESTA_DIAGNOSTICO = 2000
+
+
+def diagnostico(mensaje):
+    """Muestra información efímera solo al ejecutar con --diagnostico."""
+    if MODO_DIAGNOSTICO:
+        print(f"[diagnostico] {mensaje}", flush=True)
+
+
+def _codigo_para_diagnostico(codigo):
+    """Oculta la contraseña aunque el separador del QR llegue mal traducido."""
+    texto = str(codigo)
+    coincidencia = re.search(r"(?i)(?:pwd|password)", texto)
+    if coincidencia and "wbconfig" in texto.lower():
+        return repr(texto[:coincidencia.end()] + "=<OCULTA>")
+    return repr(texto)
+
+
+def _respuesta_para_diagnostico(datos):
+    """Convierte una respuesta HTTP en texto acotado para la consola."""
+    texto = datos.decode("utf-8", errors="replace")
+    if len(texto) > MAX_RESPUESTA_DIAGNOSTICO:
+        return repr(texto[:MAX_RESPUESTA_DIAGNOSTICO] + "...<TRUNCADA>")
+    return repr(texto)
+
+
+def _diagnosticar_peticion(codigo, config_api):
+    diagnostico(
+        "Enviando POST "
+        f"url={config_api['url']!r} usuario={config_api['usuario']!r} "
+        f"json={{'Codigo': {_codigo_para_diagnostico(codigo)}}} "
+        "Authorization=<OCULTA>"
+    )
 
 
 def cargar_config_api():
@@ -193,18 +227,28 @@ def comprobar_config_api(config_api):
     """Hace una lectura normal 'config' y distingue únicamente el HTTP 401."""
     try:
         req = _crear_peticion_api(CODIGO_PRUEBA_CONFIG, config_api)
+        _diagnosticar_peticion(CODIGO_PRUEBA_CONFIG, config_api)
         with urllib.request.urlopen(
             req, timeout=config_api.get("timeout_segundos", 5)
         ) as resp:
-            resp.read()
+            cuerpo = resp.read()
+            diagnostico(
+                f"Recibido HTTP {resp.status}: "
+                f"{_respuesta_para_diagnostico(cuerpo)}"
+            )
             return (
                 RESULTADO_CONFIG_VALIDA
                 if 200 <= resp.status < 300
                 else RESULTADO_CONFIG_INDETERMINADO
             )
     except urllib.error.HTTPError as e:
+        cuerpo = e.read()
+        diagnostico(
+            f"Recibido HTTP {e.code}: {_respuesta_para_diagnostico(cuerpo)}"
+        )
         return RESULTADO_CONFIG_401 if e.code == 401 else RESULTADO_CONFIG_INDETERMINADO
-    except Exception:
+    except Exception as e:
+        diagnostico(f"Error llamando a la API: {type(e).__name__}: {e}")
         return RESULTADO_CONFIG_INDETERMINADO
 
 
@@ -252,27 +296,51 @@ def config_desde_qr(codigo_qr):
 
 def procesar_qr_configuracion(codigo_qr):
     """Valida y, solo si procede, sustituye atómicamente la configuración."""
+    diagnostico(f"QR de configuración detectado: {_codigo_para_diagnostico(codigo_qr)}")
     try:
         candidata = config_desde_qr(codigo_qr)
-    except ValueError:
+    except ValueError as e:
+        diagnostico(f"Configuración rechazada por formato: {e}")
         return False
+    diagnostico(
+        f"Configuración interpretada: url={candidata['url']!r} "
+        f"usuario={candidata['usuario']!r} password=<OCULTA>"
+    )
 
     if os.path.exists(API_CONFIG_FILE):
         try:
             actual = cargar_config_api()
-        except Exception:
+        except Exception as e:
             # Un fichero presente pero corrupto no equivale a una instalación nueva.
+            diagnostico(
+                f"Configuración existente ilegible; no se sustituye: "
+                f"{type(e).__name__}: {e}"
+            )
             return False
-        if comprobar_config_api(actual) != RESULTADO_CONFIG_401:
+        primer_resultado = comprobar_config_api(actual)
+        diagnostico(f"Primera comprobación de la configuración actual: {primer_resultado}")
+        if primer_resultado != RESULTADO_CONFIG_401:
             return False
-        if comprobar_config_api(actual) != RESULTADO_CONFIG_401:
+        segundo_resultado = comprobar_config_api(actual)
+        diagnostico(f"Segunda comprobación de la configuración actual: {segundo_resultado}")
+        if segundo_resultado != RESULTADO_CONFIG_401:
             return False
 
     # Esta lectura normal deja en el servidor la traza Codigo="config"
     # asociada al usuario que se va a configurar. TieneAcceso puede ser False.
-    if comprobar_config_api(candidata) != RESULTADO_CONFIG_VALIDA:
+    resultado_candidata = comprobar_config_api(candidata)
+    diagnostico(f"Comprobación de la configuración candidata: {resultado_candidata}")
+    if resultado_candidata != RESULTADO_CONFIG_VALIDA:
+        diagnostico("La configuración candidata no se guarda.")
         return False
-    guardar_config_api(candidata)
+    try:
+        guardar_config_api(candidata)
+    except Exception as e:
+        diagnostico(
+            f"Error guardando {API_CONFIG_FILE}: {type(e).__name__}: {e}"
+        )
+        raise
+    diagnostico(f"Configuración guardada correctamente en {API_CONFIG_FILE}")
     return True
 
 
@@ -284,16 +352,29 @@ def validar_qr_con_api(codigo_qr, config_api):
     """
     try:
         req = _crear_peticion_api(codigo_qr, config_api)
+        _diagnosticar_peticion(codigo_qr, config_api)
 
         with urllib.request.urlopen(req, timeout=config_api.get("timeout_segundos", 5)) as resp:
-            respuesta = json.loads(resp.read().decode("utf-8"))
+            cuerpo = resp.read()
+            diagnostico(
+                f"Recibido HTTP {resp.status}: "
+                f"{_respuesta_para_diagnostico(cuerpo)}"
+            )
+            respuesta = json.loads(cuerpo.decode("utf-8"))
 
         if not respuesta.get("IsOk"):
             return False
 
         return respuesta.get("Data", {}).get("TieneAcceso", False)
 
-    except Exception:
+    except urllib.error.HTTPError as e:
+        cuerpo = e.read()
+        diagnostico(
+            f"Recibido HTTP {e.code}: {_respuesta_para_diagnostico(cuerpo)}"
+        )
+        return False
+    except Exception as e:
+        diagnostico(f"Error validando el acceso: {type(e).__name__}: {e}")
         return False  # fail closed: cualquier error = no abrir
 
 
@@ -462,6 +543,10 @@ def escuchar_lector(ruta_dispositivo, nombre_canal, rele, estado_lector, estado_
                                 codigo_qr = buffer
                                 buffer = ""
                                 ultimo_caracter = None
+                                diagnostico(
+                                    f"[{nombre_canal}] Lectura reconstruida: "
+                                    f"{_codigo_para_diagnostico(codigo_qr)}"
+                                )
                                 with estado_torno["lock"]:
                                     if estado_torno["ocupado"]:
                                         # Entrada y salida comparten el mismo
@@ -497,6 +582,8 @@ def escuchar_lector(ruta_dispositivo, nombre_canal, rele, estado_lector, estado_
 
 
 def main():
+    global MODO_DIAGNOSTICO
+    MODO_DIAGNOSTICO = "--diagnostico" in sys.argv
     iniciar_fifo()
     ruta_entrada = None
     ruta_salida = None
@@ -513,6 +600,9 @@ def main():
 
     print("=" * 60)
     print(" Sistema de lectores QR + relés iniciado")
+    if MODO_DIAGNOSTICO:
+        print(" MODO DIAGNÓSTICO: salida efímera en consola; no se guarda en disco")
+        print(" Las contraseñas y la cabecera Authorization se ocultan")
     print(" (Ctrl+C para salir)")
     print("=" * 60)
 
