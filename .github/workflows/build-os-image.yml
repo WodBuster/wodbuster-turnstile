@@ -1,0 +1,80 @@
+name: Construir imagen WodBuster Turnstile OS
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_version:
+        description: "Versión de la imagen base (por ejemplo, 0.1.0)"
+        required: true
+        default: "0.1.0"
+      release_tag:
+        description: "Release de aplicación a la que adjuntar la imagen"
+        required: true
+        default: "v1.0.12"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+
+    steps:
+      - name: Descargar el proyecto
+        uses: actions/checkout@v4
+
+      - name: Preparar compilación cruzada arm64
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            binfmt-support \
+            debian-archive-keyring \
+            git \
+            qemu-user-static \
+            xz-utils
+
+      - name: Descargar rpi-image-gen fijado
+        run: |
+          git clone --depth 1 --branch v2.7.0 \
+            https://github.com/raspberrypi/rpi-image-gen.git \
+            /tmp/rpi-image-gen
+          sudo /tmp/rpi-image-gen/install_deps.sh
+
+      - name: Construir y comprimir la imagen
+        run: |
+          chmod +x image/build-image.sh
+          image/build-image.sh \
+            --rpi-image-gen-dir /tmp/rpi-image-gen \
+            --image-version "${{ inputs.image_version }}"
+
+      - name: Comprobar límite de GitHub Release
+        run: |
+          asset="$(find dist -maxdepth 1 -name '*.img.xz' -print -quit)"
+          test -n "$asset"
+          size="$(stat -c %s "$asset")"
+          test "$size" -lt 2147483648
+          echo "Asset: $asset ($size bytes)"
+
+      - name: Conservar artefactos del workflow
+        uses: actions/upload-artifact@v4
+        with:
+          name: wodbuster-turnstile-os-${{ inputs.image_version }}
+          path: |
+            dist/*.img.xz
+            dist/*.sha256
+            dist/*.build-info.json
+          compression-level: 0
+          retention-days: 14
+
+      - name: Adjuntar a la release pública
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "${{ inputs.release_tag }}" >/dev/null
+          gh release upload "${{ inputs.release_tag }}" \
+            dist/*.img.xz \
+            dist/*.sha256 \
+            dist/*.build-info.json \
+            --clobber
+
