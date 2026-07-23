@@ -7,7 +7,9 @@ Codex. La imagen se construye desde cero; no se clona una SD utilizada.
 
 - Generador fijado: `raspberrypi/rpi-image-gen` v2.7.0.
 - Base: Raspberry Pi OS Trixie arm64 minimal.
-- Dispositivo: `rpi-generic64`.
+- Dispositivo: `rpi5`. `rpi-image-gen` exige una capa concreta que proporcione
+  `rpi-device`; la capa familiar `rpi-generic64` no puede utilizarse sola en la
+  versión 2.7.0.
 - Imagen: MBR, boot FAT y raíz ext4 de 3 GiB.
 - El primer arranque amplía la raíz a la capacidad de la microSD.
 - Aplicación instalada en `/home/jesus/torno_qr` para mantener compatibilidad
@@ -132,4 +134,3 @@ La configuración de acceso no forma parte del primer arranque. La crea
 
 No se debe declarar soporte para Pi 3/4/Zero 2 W hasta repetir físicamente este
 checklist en cada modelo.
-

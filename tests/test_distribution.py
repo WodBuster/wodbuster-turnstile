@@ -98,9 +98,8 @@ class DistributionTests(unittest.TestCase):
         )
         rendered = re.sub(r'"\$\(.*?\)"', '"commit"', rendered)
         data = json.loads(rendered)
-        self.assertEqual(data["device_layer"], "rpi-generic64")
+        self.assertEqual(data["device_layer"], "rpi5")
 
 
 if __name__ == "__main__":
     unittest.main()
-

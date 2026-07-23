@@ -147,7 +147,7 @@ cat > "$output_dir/$base_name.build-info.json" <<EOF
   "application_commit": "$(git -C "$repo_root" rev-parse HEAD)",
   "rpi_image_gen_commit": "$(git -C "$rpi_image_gen_dir" rev-parse HEAD)",
   "base": "Raspberry Pi OS Trixie arm64 minimal",
-  "device_layer": "rpi-generic64"
+  "device_layer": "rpi5"
 }
 EOF
 
@@ -155,4 +155,3 @@ echo "Imagen creada:"
 echo "  $compressed"
 echo "  $compressed.sha256"
 echo "  $output_dir/$base_name.build-info.json"
-

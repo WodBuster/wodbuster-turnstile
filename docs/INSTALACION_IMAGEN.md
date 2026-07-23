@@ -10,16 +10,17 @@ La primera imagen distribuible está preparada con:
 - Logs de `systemd-journald` únicamente en memoria.
 - Configuración de acceso ausente: se crea al escanear un QR `wbconfig`.
 
-La capa de sistema es compatible con Raspberry Pi de 64 bits, pero el soporte
-funcional inicial se limita al hardware probado:
+Esta primera imagen usa la capa oficial `rpi5`, por lo que el soporte funcional
+se limita al hardware probado:
 
 - Raspberry Pi 5.
 - Waveshare RPi Relay Board con entrada en GPIO20 y salida en GPIO21.
 - Los dos lectores conectados en los mismos puertos físicos usados durante las
   pruebas.
 
-Raspberry Pi 3B+, 4 y Zero 2 W no deben anunciarse como soportadas hasta
-completar el checklist físico.
+Raspberry Pi 3B+, 4 y Zero 2 W no deben anunciarse como soportadas ni grabarse
+con este binario. Se podrán generar variantes futuras con su capa oficial de
+dispositivo y el mismo programa, después de completar el checklist físico.
 
 ## Requisitos
 
@@ -132,4 +133,3 @@ sudo systemctl start lector-qr.service
 
 No dejes simultáneamente el proceso de diagnóstico y el servicio: competirían
 por el GPIO.
-

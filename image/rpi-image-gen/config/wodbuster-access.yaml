@@ -1,5 +1,5 @@
 device:
-  layer: rpi-generic64
+  layer: rpi5
   user1: wodbuster
   hostname: wodbuster-access
 
@@ -36,4 +36,3 @@ packages:
   - python3-gpiozero
   - python3-lgpio
   - xz-utils
-
