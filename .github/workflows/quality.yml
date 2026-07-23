@@ -1,0 +1,47 @@
+name: Comprobaciones
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Instalar validadores
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends python3-yaml shellcheck
+
+      - name: Compilar y probar Python
+        run: |
+          python3 -m py_compile lector_qr_rele.py vigilante_red.py actualizador.py
+          python3 -m unittest discover -s tests -v
+
+      - name: Validar YAML
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import yaml
+
+          for path in (
+              Path("image/rpi-image-gen/config/wodbuster-access.yaml"),
+              Path(".github/workflows/build-os-image.yml"),
+              Path(".github/workflows/quality.yml"),
+          ):
+              yaml.load(path.read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
+              print(f"OK: {path}")
+          PY
+
+      - name: Validar scripts shell
+        run: |
+          shellcheck \
+            image/build-image.sh \
+            image/rpi-image-gen/bdebstrap/customize90-wodbuster \
+            image/rpi-image-gen/rootfs-overlay/usr/local/sbin/wodbuster-firstboot
+
