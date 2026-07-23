@@ -99,6 +99,11 @@ class DistributionTests(unittest.TestCase):
         rendered = re.sub(r'"\$\(.*?\)"', '"commit"', rendered)
         data = json.loads(rendered)
         self.assertEqual(data["device_layer"], "rpi5")
+        self.assertIn(
+            'raw_image="$workroot/deploy-$image_version/wodbuster-turnstile-os.img"',
+            build_script,
+        )
+        self.assertNotIn('find "$workroot"', build_script)
 
 
 if __name__ == "__main__":

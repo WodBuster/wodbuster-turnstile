@@ -123,8 +123,8 @@ fi
   "IGconf_sys_workroot=$workroot" \
   "IGconf_ssh_pubkey_user1=$ssh_public_key"
 
-raw_image="$(find "$workroot" -type f -name 'wodbuster-turnstile-os.img' -print -quit)"
-if [[ -z "$raw_image" ]]; then
+raw_image="$workroot/deploy-$image_version/wodbuster-turnstile-os.img"
+if [[ ! -f "$raw_image" ]]; then
   echo "rpi-image-gen terminó sin producir wodbuster-turnstile-os.img" >&2
   exit 1
 fi
