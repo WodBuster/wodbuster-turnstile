@@ -1,5 +1,9 @@
 acceso_config.json
 vigilante_red_config.json
 estado_vigilante_red.json
+hardware_config.json
 __pycache__/
 *.pyc
+dist/
+image/.work/
+.tmp-rpi-image-gen/

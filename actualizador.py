@@ -197,16 +197,22 @@ def descargar_y_extraer(url_descarga):
 def aplicar_actualizacion(carpeta_origen, nueva_version):
     """Copia los archivos nuevos sobre la instalación actual,
     e instala en systemd los archivos .service y .timer si han cambiado."""
-    ARCHIVOS_IGNORAR = {
-        "acceso_config.json",          # credenciales locales, nunca sobrescribir
-        "vigilante_red_config.json",   # configuración local de cada Pi, nunca sobrescribir
-        "estado_vigilante_red.json",   # estado interno del vigilante, nunca sobrescribir
+    # Solo desplegamos el runtime explícitamente permitido. Así, documentación,
+    # workflows y herramientas para construir la imagen nunca terminan copiados
+    # en la SD por una actualización OTA.
+    ARCHIVOS_RUNTIME = {
+        "lector_qr_rele.py",
+        "vigilante_red.py",
+        "actualizador.py",
+        "VERSION",
+        "LICENSE",
+        *UNIDADES_SYSTEMD,
     }
 
-    for item in os.listdir(carpeta_origen):
-        if item.startswith(".") or item in ARCHIVOS_IGNORAR:
-            continue
+    for item in sorted(ARCHIVOS_RUNTIME):
         origen = os.path.join(carpeta_origen, item)
+        if not os.path.exists(origen):
+            raise RuntimeError(f"La release no contiene el archivo obligatorio: {item}")
         destino = os.path.join(INSTALL_DIR, item)
         if os.path.isdir(origen):
             if os.path.exists(destino):

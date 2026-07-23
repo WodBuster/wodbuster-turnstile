@@ -1,0 +1,39 @@
+device:
+  layer: rpi-generic64
+  user1: wodbuster
+  hostname: wodbuster-access
+
+image:
+  layer: image-rpios
+  name: wodbuster-turnstile-os
+  boot_part_size: 512M
+  root_part_size: 3G
+
+layer:
+  base: trixie-minbase
+
+artefact:
+  version: development
+
+deploy:
+  compression: none
+
+locale:
+  default: es_ES.UTF-8
+  keyboard_keymap: es
+  keyboard_layout: Spanish
+  timezone: Europe/Madrid
+
+ssh:
+  pubkey_only: y
+
+packages:
+  - ca-certificates
+  - cloud-guest-utils
+  - curl
+  - python3
+  - python3-evdev
+  - python3-gpiozero
+  - python3-lgpio
+  - xz-utils
+

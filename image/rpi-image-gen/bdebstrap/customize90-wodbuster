@@ -1,0 +1,40 @@
+#!/bin/bash
+set -euo pipefail
+
+rootfs="$1"
+app_dir="$rootfs/home/jesus/torno_qr"
+
+test -f "$app_dir/lector_qr_rele.py"
+test -f "$app_dir/actualizador.py"
+test -f "$rootfs/etc/systemd/system/lector-qr.service"
+test -f "$rootfs/usr/local/sbin/wodbuster-firstboot"
+
+install -d -m 0700 "$rootfs/home/jesus/torno_qr_backups"
+install -d -m 0755 "$rootfs/var/lib/wodbuster"
+
+find "$app_dir" -type d -exec chmod 0755 {} +
+find "$app_dir" -type f -exec chmod 0644 {} +
+chmod 0755 \
+  "$app_dir/lector_qr_rele.py" \
+  "$app_dir/vigilante_red.py" \
+  "$app_dir/actualizador.py"
+chmod 0755 "$rootfs/usr/local/sbin/wodbuster-firstboot"
+
+# La imagen nunca contiene credenciales ni estado de una instalación anterior.
+rm -f \
+  "$app_dir/acceso_config.json" \
+  "$app_dir/vigilante_red_config.json" \
+  "$app_dir/estado_vigilante_red.json" \
+  "$app_dir/hardware_config.json"
+
+# Cada Raspberry genera su identidad y sus claves SSH en el primer arranque.
+rm -f "$rootfs/etc/ssh/ssh_host_"*
+rm -f "$rootfs/etc/machine-id" "$rootfs/var/lib/dbus/machine-id"
+install -m 0644 /dev/null "$rootfs/etc/machine-id"
+ln -s /etc/machine-id "$rootfs/var/lib/dbus/machine-id"
+
+systemctl --root="$rootfs" enable wodbuster-firstboot.service
+systemctl --root="$rootfs" enable lector-qr.service
+systemctl --root="$rootfs" enable torno-network-watchdog.service
+systemctl --root="$rootfs" enable torno-updater.timer
+

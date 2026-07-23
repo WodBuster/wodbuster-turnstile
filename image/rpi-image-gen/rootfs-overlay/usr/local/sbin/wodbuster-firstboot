@@ -1,0 +1,64 @@
+#!/bin/bash
+set -euo pipefail
+
+marker="/var/lib/wodbuster/firstboot-complete"
+mkdir -p /var/lib/wodbuster
+
+if [[ -e "$marker" ]]; then
+  exit 0
+fi
+
+exec 9>/run/wodbuster-firstboot.lock
+flock -n 9 || exit 0
+
+log() {
+  printf '[wodbuster-firstboot] %s\n' "$*"
+}
+
+if [[ ! -s /etc/machine-id ]]; then
+  systemd-machine-id-setup
+fi
+
+# Las claves privadas son exclusivas de cada Raspberry y nunca vienen en la imagen.
+ssh-keygen -A
+
+serial=""
+if [[ -r /proc/device-tree/serial-number ]]; then
+  serial="$(tr -cd '[:alnum:]' < /proc/device-tree/serial-number | tail -c 8)"
+fi
+if [[ -z "$serial" ]]; then
+  serial="$(cut -c 1-8 /etc/machine-id)"
+fi
+hostname_nuevo="wodbuster-${serial,,}"
+printf '%s\n' "$hostname_nuevo" > /etc/hostname
+if grep -qE '^127\.0\.1\.1[[:space:]]' /etc/hosts; then
+  sed -i -E "s/^127\.0\.1\.1[[:space:]].*/127.0.1.1\t${hostname_nuevo}/" /etc/hosts
+else
+  printf '127.0.1.1\t%s\n' "$hostname_nuevo" >> /etc/hosts
+fi
+hostname "$hostname_nuevo"
+log "Identidad preparada: $hostname_nuevo"
+
+# Amplía la partición raíz para ocupar la microSD. Si el soporte no permite
+# ampliarla, el torno puede arrancar igualmente con los 3 GiB de la imagen.
+root_source="$(readlink -f "$(findmnt -n -o SOURCE /)")"
+parent_name="$(lsblk -no PKNAME "$root_source" | head -n 1 || true)"
+part_number="$(lsblk -no PARTN "$root_source" | head -n 1 || true)"
+if [[ -n "$parent_name" && -n "$part_number" ]]; then
+  if growpart "/dev/$parent_name" "$part_number"; then
+    log "Partición raíz ampliada."
+  else
+    log "La partición raíz ya estaba ampliada o no necesitaba cambios."
+  fi
+  if resize2fs "$root_source"; then
+    log "Sistema de archivos ampliado a la capacidad disponible."
+  else
+    log "No se pudo ampliar ext4; se mantiene su tamaño actual."
+  fi
+else
+  log "No se pudo identificar la partición raíz; se mantiene su tamaño actual."
+fi
+
+install -m 0600 /dev/null "$marker"
+sync
+log "Primer arranque completado."

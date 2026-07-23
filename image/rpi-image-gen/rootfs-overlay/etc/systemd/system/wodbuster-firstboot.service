@@ -1,0 +1,14 @@
+[Unit]
+Description=Preparación única de WodBuster Turnstile
+After=local-fs.target
+Before=lector-qr.service torno-network-watchdog.service torno-updater.timer
+ConditionPathExists=!/var/lib/wodbuster/firstboot-complete
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/wodbuster-firstboot
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+
