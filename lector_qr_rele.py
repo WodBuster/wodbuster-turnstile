@@ -37,7 +37,6 @@ import urllib.request
 import urllib.error
 import urllib.parse
 import base64
-import hashlib
 import re
 import tempfile
 from datetime import datetime
@@ -136,12 +135,6 @@ RESULTADO_CONFIG_INDETERMINADO = "indeterminado"
 PATRON_BOX = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9-]{0,62}$")
 MODO_DIAGNOSTICO = False
 MAX_RESPUESTA_DIAGNOSTICO = 2000
-VENTANA_CONFIRMACION_CONFIG_SEGUNDOS = 120
-_confirmacion_config = {
-    "huella": None,
-    "expira": 0.0,
-}
-_confirmacion_config_lock = threading.Lock()
 
 
 def diagnostico(mensaje):
@@ -174,50 +167,6 @@ def _diagnosticar_peticion(codigo, config_api):
         f"json={{'Codigo': {_codigo_para_diagnostico(codigo)}}} "
         "Authorization=<OCULTA>"
     )
-
-
-def _huella_config(config_api):
-    """Identifica una candidata sin conservar su contraseña en memoria."""
-    contenido = json.dumps(
-        {
-            "url": config_api["url"],
-            "usuario": config_api["usuario"],
-            "password": config_api["password"],
-        },
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    return hashlib.sha256(contenido).digest()
-
-
-def _cancelar_confirmacion_config():
-    with _confirmacion_config_lock:
-        _confirmacion_config["huella"] = None
-        _confirmacion_config["expira"] = 0.0
-
-
-def _es_segunda_lectura_config(config_api):
-    """Exige dos escaneos del mismo QR dentro de una ventana temporal.
-
-    Solo se conserva en RAM una huella SHA-256 de la candidata. La primera
-    lectura arma la confirmación y la segunda la consume.
-    """
-    ahora = time.monotonic()
-    huella = _huella_config(config_api)
-    with _confirmacion_config_lock:
-        coincide = (
-            _confirmacion_config["huella"] == huella
-            and ahora <= _confirmacion_config["expira"]
-        )
-        if coincide:
-            _confirmacion_config["huella"] = None
-            _confirmacion_config["expira"] = 0.0
-            return True
-        _confirmacion_config["huella"] = huella
-        _confirmacion_config["expira"] = (
-            ahora + VENTANA_CONFIRMACION_CONFIG_SEGUNDOS
-        )
-        return False
 
 
 def cargar_config_api():
@@ -360,7 +309,6 @@ def procesar_qr_configuracion(codigo_qr):
     try:
         candidata = config_desde_qr(codigo_qr)
     except ValueError as e:
-        _cancelar_confirmacion_config()
         diagnostico(f"Configuración rechazada por formato: {e}")
         return False
     diagnostico(
@@ -373,7 +321,6 @@ def procesar_qr_configuracion(codigo_qr):
             actual = cargar_config_api()
         except Exception as e:
             # Un fichero presente pero corrupto no equivale a una instalación nueva.
-            _cancelar_confirmacion_config()
             diagnostico(
                 f"Configuración existente ilegible; no se sustituye: "
                 f"{type(e).__name__}: {e}"
@@ -382,24 +329,17 @@ def procesar_qr_configuracion(codigo_qr):
         resultado_actual = comprobar_config_api(actual)
         diagnostico(f"Comprobación de la configuración actual: {resultado_actual}")
         if resultado_actual != RESULTADO_CONFIG_RECHAZADA:
-            _cancelar_confirmacion_config()
             return False
-
-        if not _es_segunda_lectura_config(candidata):
-            diagnostico(
-                "Primera lectura aceptada como confirmación. "
-                "Vuelve a escanear el mismo QR durante los próximos "
-                f"{VENTANA_CONFIRMACION_CONFIG_SEGUNDOS}s."
-            )
-            return False
-        diagnostico("Segunda lectura del mismo QR confirmada.")
+        diagnostico(
+            "Las credenciales actuales han sido rechazadas; "
+            "se comprueba la configuración candidata."
+        )
 
     # Esta lectura normal deja en el servidor la traza Codigo="config"
     # asociada al usuario que se va a configurar. TieneAcceso puede ser False.
     resultado_candidata = comprobar_config_api(candidata)
     diagnostico(f"Comprobación de la configuración candidata: {resultado_candidata}")
     if resultado_candidata != RESULTADO_CONFIG_VALIDA:
-        _cancelar_confirmacion_config()
         diagnostico("La configuración candidata no se guarda.")
         return False
     try:
@@ -409,7 +349,6 @@ def procesar_qr_configuracion(codigo_qr):
             f"Error guardando {API_CONFIG_FILE}: {type(e).__name__}: {e}"
         )
         raise
-    _cancelar_confirmacion_config()
     diagnostico(f"Configuración guardada correctamente en {API_CONFIG_FILE}")
     return True
 
